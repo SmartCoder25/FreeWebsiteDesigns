@@ -1,0 +1,321 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Service Optimization Dashboard</title>
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/axios/dist/axios.min.js"></script>
+    <script src="https://unpkg.com/recharts@2.8.0/umd/Recharts.js"></script>
+    <style>
+        body {
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+        }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect } = React;
+        const { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } = Recharts;
+
+        // API service
+        const apiService = {
+            baseURL: 'http://localhost:8000',
+            
+            async submitForm(data) {
+                try {
+                    const response = await axios.post(`${this.baseURL}/api/process`, data);
+                    return response.data;
+                } catch (error) {
+                    console.error('API Error:', error);
+                    throw new Error(error.response?.data?.detail || 'Failed to process request');
+                }
+            }
+        };
+
+        // Form Component
+        const ServiceForm = ({ onSubmit, isLoading }) => {
+            const [formData, setFormData] = useState({
+                serviceName: '',
+                parameterToOptimize: '',
+                durationInDays: ''
+            });
+            
+            const [errors, setErrors] = useState({});
+
+            const handleChange = (e) => {
+                const { name, value } = e.target;
+                setFormData(prev => ({
+                    ...prev,
+                    [name]: value
+                }));
+                
+                // Clear error when user starts typing
+                if (errors[name]) {
+                    setErrors(prev => ({
+                        ...prev,
+                        [name]: ''
+                    }));
+                }
+            };
+
+            const validateForm = () => {
+                const newErrors = {};
+                
+                if (!formData.serviceName.trim()) {
+                    newErrors.serviceName = 'Service name is required';
+                }
+                
+                if (!formData.parameterToOptimize.trim()) {
+                    newErrors.parameterToOptimize = 'Parameter to optimize is required';
+                }
+                
+                if (!formData.durationInDays) {
+                    newErrors.durationInDays = 'Duration is required';
+                } else if (isNaN(formData.durationInDays) || parseInt(formData.durationInDays) <= 0) {
+                    newErrors.durationInDays = 'Duration must be a positive number';
+                }
+                
+                setErrors(newErrors);
+                return Object.keys(newErrors).length === 0;
+            };
+
+            const handleSubmit = (e) => {
+                e.preventDefault();
+                if (validateForm()) {
+                    onSubmit({
+                        ...formData,
+                        durationInDays: parseInt(formData.durationInDays)
+                    });
+                }
+            };
+
+            return (
+                <div className="bg-white rounded-2xl shadow-2xl p-8 max-w-md w-full">
+                    <div className="text-center mb-8">
+                        <h2 className="text-3xl font-bold text-gray-800 mb-2">Service Optimization</h2>
+                        <p className="text-gray-600">Configure your optimization parameters</p>
+                    </div>
+                    
+                    <form onSubmit={handleSubmit} className="space-y-6">
+                        <div>
+                            <label className="block text-sm font-semibold text-gray-700 mb-2">
+                                Service Name
+                            </label>
+                            <input
+                                type="text"
+                                name="serviceName"
+                                value={formData.serviceName}
+                                onChange={handleChange}
+                                placeholder="e.g., user-authentication-service"
+                                className={`w-full px-4 py-3 border-2 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-colors ${
+                                    errors.serviceName ? 'border-red-500' : 'border-gray-300'
+                                }`}
+                            />
+                            {errors.serviceName && (
+                                <p className="text-red-500 text-sm mt-1">{errors.serviceName}</p>
+                            )}
+                        </div>
+
+                        <div>
+                            <label className="block text-sm font-semibold text-gray-700 mb-2">
+                                Parameter to Optimize
+                            </label>
+                            <input
+                                type="text"
+                                name="parameterToOptimize"
+                                value={formData.parameterToOptimize}
+                                onChange={handleChange}
+                                placeholder="e.g., response_time, cpu_usage, memory"
+                                className={`w-full px-4 py-3 border-2 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-colors ${
+                                    errors.parameterToOptimize ? 'border-red-500' : 'border-gray-300'
+                                }`}
+                            />
+                            {errors.parameterToOptimize && (
+                                <p className="text-red-500 text-sm mt-1">{errors.parameterToOptimize}</p>
+                            )}
+                        </div>
+
+                        <div>
+                            <label className="block text-sm font-semibold text-gray-700 mb-2">
+                                Duration (Days)
+                            </label>
+                            <input
+                                type="number"
+                                name="durationInDays"
+                                value={formData.durationInDays}
+                                onChange={handleChange}
+                                placeholder="e.g., 30"
+                                min="1"
+                                className={`w-full px-4 py-3 border-2 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-colors ${
+                                    errors.durationInDays ? 'border-red-500' : 'border-gray-300'
+                                }`}
+                            />
+                            {errors.durationInDays && (
+                                <p className="text-red-500 text-sm mt-1">{errors.durationInDays}</p>
+                            )}
+                        </div>
+
+                        <button
+                            type="submit"
+                            disabled={isLoading}
+                            className="w-full bg-gradient-to-r from-blue-600 to-purple-600 text-white font-semibold py-3 px-6 rounded-lg hover:from-blue-700 hover:to-purple-700 transition-all duration-300 transform hover:scale-105 disabled:opacity-50 disabled:cursor-not-allowed disabled:transform-none"
+                        >
+                            {isLoading ? (
+                                <div className="flex items-center justify-center">
+                                    <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-white mr-2"></div>
+                                    Processing...
+                                </div>
+                            ) : (
+                                'Start Optimization'
+                            )}
+                        </button>
+                    </form>
+                </div>
+            );
+        };
+
+        // Graph Component
+        const OptimizationGraph = ({ data }) => {
+            if (!data || !data.length) {
+                return (
+                    <div className="bg-white rounded-2xl shadow-2xl p-8 max-w-4xl w-full">
+                        <div className="text-center py-12">
+                            <div className="w-16 h-16 bg-gray-200 rounded-full flex items-center justify-center mx-auto mb-4">
+                                📊
+                            </div>
+                            <h3 className="text-xl font-semibold text-gray-700 mb-2">No Data Available</h3>
+                            <p className="text-gray-500">Submit the form to view optimization results</p>
+                        </div>
+                    </div>
+                );
+            }
+
+            return (
+                <div className="bg-white rounded-2xl shadow-2xl p-8 max-w-4xl w-full">
+                    <div className="mb-6">
+                        <h3 className="text-2xl font-bold text-gray-800 mb-2">Optimization Results</h3>
+                        <p className="text-gray-600">Performance metrics over time</p>
+                    </div>
+                    
+                    <div className="h-96">
+                        <ResponsiveContainer width="100%" height="100%">
+                            <LineChart data={data}>
+                                <CartesianGrid strokeDasharray="3 3" stroke="#f0f0f0" />
+                                <XAxis 
+                                    dataKey="day" 
+                                    stroke="#666"
+                                    tick={{ fill: '#666' }}
+                                />
+                                <YAxis 
+                                    stroke="#666"
+                                    tick={{ fill: '#666' }}
+                                />
+                                <Tooltip 
+                                    contentStyle={{
+                                        background: '#fff',
+                                        border: '1px solid #e2e8f0',
+                                        borderRadius: '8px',
+                                        boxShadow: '0 4px 6px -1px rgba(0, 0, 0, 0.1)'
+                                    }}
+                                />
+                                <Legend />
+                                <Line 
+                                    type="monotone" 
+                                    dataKey="value" 
+                                    stroke="#8884d8" 
+                                    strokeWidth={3}
+                                    dot={{ fill: '#8884d8', strokeWidth: 2, r: 6 }}
+                                    activeDot={{ r: 8, stroke: '#8884d8', strokeWidth: 2 }}
+                                />
+                            </LineChart>
+                        </ResponsiveContainer>
+                    </div>
+                </div>
+            );
+        };
+
+        // Main App Component
+        const App = () => {
+            const [isLoading, setIsLoading] = useState(false);
+            const [graphData, setGraphData] = useState(null);
+            const [error, setError] = useState('');
+            const [success, setSuccess] = useState('');
+
+            const handleFormSubmit = async (formData) => {
+                setIsLoading(true);
+                setError('');
+                setSuccess('');
+                
+                try {
+                    // Simulate API call with mock data for demo
+                    await new Promise(resolve => setTimeout(resolve, 2000));
+                    
+                    // Mock response data
+                    const mockData = Array.from({ length: formData.durationInDays }, (_, i) => ({
+                        day: i + 1,
+                        value: Math.floor(Math.random() * 100) + 50 - (i * 0.5)
+                    }));
+                    
+                    setGraphData(mockData);
+                    setSuccess(`Optimization analysis completed for ${formData.serviceName}`);
+                    
+                    // Uncomment below for actual API call
+                    // const result = await apiService.submitForm(formData);
+                    // setGraphData(result.data);
+                    // setSuccess(result.message);
+                    
+                } catch (err) {
+                    setError(err.message);
+                } finally {
+                    setIsLoading(false);
+                }
+            };
+
+            return (
+                <div className="min-h-screen flex flex-col items-center justify-center p-4 space-y-8">
+                    <div className="text-center mb-8">
+                        <h1 className="text-5xl font-bold text-white mb-4">
+                            Service Performance Optimizer
+                        </h1>
+                        <p className="text-xl text-white opacity-90">
+                            Analyze and optimize your services with Datadog integration
+                        </p>
+                    </div>
+                    
+                    {error && (
+                        <div className="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-lg max-w-md w-full">
+                            <strong className="font-bold">Error: </strong>
+                            <span>{error}</span>
+                        </div>
+                    )}
+                    
+                    {success && (
+                        <div className="bg-green-100 border border-green-400 text-green-700 px-4 py-3 rounded-lg max-w-md w-full">
+                            <strong className="font-bold">Success: </strong>
+                            <span>{success}</span>
+                        </div>
+                    )}
+                    
+                    <ServiceForm onSubmit={handleFormSubmit} isLoading={isLoading} />
+                    
+                    <OptimizationGraph data={graphData} />
+                    
+                    <footer className="text-white opacity-75 text-center">
+                        <p>Built with React, FastAPI, and Datadog integration</p>
+                    </footer>
+                </div>
+            );
+        };
+
+        ReactDOM.render(<App />, document.getElementById('root'));
+    </script>
+</body>
+</html>

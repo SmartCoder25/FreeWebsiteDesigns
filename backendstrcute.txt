@@ -1,0 +1,146 @@
+Perfect! I'll modify the backend to integrate with your existing Python optimization file. Let me update the structure to use your custom optimization script:Now let me add the updated environment configuration and create a sample optimization script template:Perfect! I've updated the backend to integrate with your existing Python optimization file. Here's what I've changed:
+
+## 🔧 **Updated Backend Integration**
+
+### **Key Changes Made:**
+
+1. **Modified `services/run_script.py`** to call your optimization script
+2. **Added script path configuration** in environment variables
+3. **Created template** for your optimization script format
+
+## 🚀 **How It Works Now:**
+
+### **1. Script Integration Methods:**
+The backend supports **two ways** to call your optimization script:
+
+**Method A: Subprocess Call (Recommended)**
+- Runs your script as a separate process
+- Sends input via JSON through stdin
+- Receives output via stdout
+- More secure and isolated
+
+**Method B: Direct Import**
+- Imports your script as a Python module
+- Calls your `optimize()` or `main()` function directly
+- Faster execution but requires proper module structure
+
+### **2. Input Format to Your Script:**
+Your script will receive this JSON input:
+```json
+{
+  "service_name": "user-auth-service", 
+  "parameter_to_optimize": "response_time",
+  "duration_in_days": 30,
+  "historical_data": [
+    {"timestamp": 1234567890, "value": 95.2},
+    {"timestamp": 1234567891, "value": 87.1}
+  ],
+  "timestamp": "2024-01-15T10:30:00"
+}
+```
+
+### **3. Expected Output from Your Script:**
+Your script should return JSON in this format:
+```json
+{
+  "success": true,
+  "optimized_values": [
+    {"day": 1, "value": 95.2, "status": "normal"},
+    {"day": 2, "value": 89.1, "status": "excellent"}
+  ],
+  "improvement_percentage": 15.3,
+  "best_configuration": {"param1": "value1"},
+  "insights": [
+    {
+      "type": "improvement",
+      "message": "Response time improved significantly", 
+      "impact_score": 8.5
+    }
+  ],
+  "recommendations": [
+    {
+      "priority": "high",
+      "action": "Apply optimized configuration",
+      "expected_improvement": "15% improvement",
+      "effort_required": "Low"
+    }
+  ],
+  "warnings": [],
+  "metadata": {
+    "algorithm_used": "your_algorithm_name"
+  }
+}
+```
+
+## 📝 **Setup Instructions:**
+
+### **1. Place Your Optimization Script:**
+```bash
+# Put your optimization script in the backend folder
+backend/
+├── your_optimization_script.py  # ← Your existing script here
+├── main.py
+├── routers/
+└── ...
+```
+
+### **2. Update Environment Variables:**
+```bash
+# In your .env file
+OPTIMIZATION_SCRIPT_PATH=./your_optimization_script.py
+```
+
+### **3. Modify Your Script (if needed):**
+Make sure your script can:
+- **Read JSON input** from stdin (for subprocess method)
+- **Return JSON output** to stdout
+- **Handle the input format** shown above
+
+### **4. Example Integration:**
+If your current script is `my_optimizer.py`, you can:
+
+**Option 1: Modify your existing script** to match the template format
+**Option 2: Create a wrapper** that calls your existing functions:
+
+```python
+# wrapper_script.py
+import json
+import sys
+from your_existing_optimizer import your_optimize_function
+
+def main():
+    input_data = json.loads(sys.stdin.read())
+    
+    # Call your existing optimization function
+    results = your_optimize_function(
+        service=input_data['service_name'],
+        param=input_data['parameter_to_optimize'], 
+        days=input_data['duration_in_days']
+    )
+    
+    # Convert to expected format
+    output = {
+        "success": True,
+        "optimized_values": results,  # Your results here
+        "improvement_percentage": 10.0,  # Calculate from your results
+        # ... other fields
+    }
+    
+    print(json.dumps(output))
+
+if __name__ == '__main__':
+    main()
+```
+
+## 🔄 **Data Flow:**
+
+1. **Frontend** submits form → **FastAPI**
+2. **FastAPI** calls `OptimizationService.run_optimization()`
+3. **Service** prepares input data and calls **your Python script**
+4. **Your script** runs optimization and returns results
+5. **Service** converts results to frontend format
+6. **Frontend** displays optimized values in graph
+
+The backend is now ready to work with your existing optimization script! Just update the script path and ensure your script can handle the JSON input/output format.
+
+Would you like me to help you create a specific wrapper for your existing optimization script?
