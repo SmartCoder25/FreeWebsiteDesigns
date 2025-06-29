@@ -1,0 +1,1245 @@
+from pydantic import BaseModel, Field, validator
+from typing import List, Optional
+from datetime import datetime
+
+class OptimizationRequest(BaseModel):
+    serviceType: str = Field(..., description="Type of the service (e.g., type1, type2, type3, type4)")
+    serviceName: str = Field(..., min_length=1, max_length=100, description="Name of the service to optimize")
+    parametersToOptimize: List[str] = Field(..., description="List of parameters to optimize")
+    startDate: str = Field(..., description="Start date for the optimization (YYYY-MM-DD format)")
+    endDate: str = Field(..., description="End date for the optimization (YYYY-MM-DD format)")
+
+    @validator('serviceName')
+    def validate_service_name(cls, v):
+        if not v or not v.strip():
+            raise ValueError('Service name cannot be empty')
+        return v.strip()
+    
+    @validator('parametersToOptimize')
+    def validate_parameters(cls, v):
+        # Updated to match frontend options
+        allowed_parameters = [
+            'cpu_usage', 'memory', 'DynamoDB Rcu', 'DynamoDB Wcu'
+        ]
+        
+        if not v or len(v) == 0:
+            raise ValueError('At least one parameter to optimize is required')
+            
+        for param in v:
+            if param not in allowed_parameters:
+                raise ValueError(f'Each parameter must be one of: {", ".join(allowed_parameters)}')
+        return v
+
+    @validator('startDate')
+    def validate_start_date(cls, v):
+        try:
+            datetime.strptime(v, '%Y-%m-%d')
+            return v
+        except ValueError:
+            raise ValueError('Start date must be in YYYY-MM-DD format')
+
+    @validator('endDate')
+    def validate_end_date(cls, v, values):
+        try:
+            end_date = datetime.strptime(v, '%Y-%m-%d')
+            if 'startDate' in values:
+                start_date = datetime.strptime(values['startDate'], '%Y-%m-%d')
+                if end_date <= start_date:
+                    raise ValueError('End date must be after start date')
+            return v
+        except ValueError as e:
+            if 'End date must be after start date' in str(e):
+                raise e
+            raise ValueError('End date must be in YYYY-MM-DD format')
+
+    @validator('serviceType')
+    def validate_service_type(cls, v):
+        allowed_types = ['type1', 'type2', 'type3', 'type4']
+        if v not in allowed_types:
+            raise ValueError(f'Service type must be one of: {", ".join(allowed_types)}')
+        return v
+
+class MetricPoint(BaseModel):
+    day: int
+    value: float
+    timestamp: datetime
+    status: str = "normal"
+
+class OptimizationInsight(BaseModel):
+    type: str  # "improvement", "warning", "critical"
+    message: str
+    impact_score: float  # 0-10 scale
+    
+class OptimizationRecommendation(BaseModel):
+    priority: str  # "high", "medium", "low" 
+    action: str
+    expected_improvement: str
+    effort_required: str
+
+class OptimizationResponse(BaseModel):
+    success: bool
+    message: str
+    serviceType: str
+    serviceName: str
+    parametersToOptimize: List[str]
+    startDate: str
+    endDate: str
+    data: List[MetricPoint]
+    insights: List[OptimizationInsight]
+    recommendations: List[OptimizationRecommendation]
+    generated_at: datetime = Field(default_factory=datetime.now)
+
+
+
+
+
+
+
+/////////////////
+
+
+from fastapi import APIRouter, HTTPException
+from models.request_schema import OptimizationRequest, OptimizationResponse
+from services.run_script import OptimizationService
+from datetime import datetime
+import logging
+
+# Setup logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+router = APIRouter()
+
+@router.post("/process", response_model=OptimizationResponse)
+async def process_optimization(request: OptimizationRequest):
+    """
+    Process optimization request and return results with service metrics
+    """
+    try:
+        logger.info(f"Processing optimization for service: {request.serviceName} (Type: {request.serviceType})")
+        
+        # Convert string dates to datetime objects for internal processing
+        start_date = datetime.strptime(request.startDate, '%Y-%m-%d')
+        end_date = datetime.strptime(request.endDate, '%Y-%m-%d')
+        
+        # Calculate duration in days
+        duration_days = (end_date - start_date).days
+        
+        # Initialize optimization service
+        optimization_service = OptimizationService()
+        
+        # Run the optimization process
+        result = await optimization_service.run_optimization(
+            service_name=request.serviceName,
+            service_type=request.serviceType,
+            parameters_to_optimize=request.parametersToOptimize,
+            start_date=start_date,
+            end_date=end_date,
+            duration_days=duration_days
+        )
+        
+        logger.info(f"Optimization completed for {request.serviceName}")
+        
+        return OptimizationResponse(
+            success=True,
+            message=f"Optimization analysis completed for {request.serviceName}",
+            serviceType=request.serviceType,
+            serviceName=request.serviceName,
+            parametersToOptimize=request.parametersToOptimize,
+            startDate=request.startDate,
+            endDate=request.endDate,
+            data=result["metrics"],
+            insights=result["insights"],
+            recommendations=result["recommendations"]
+        )
+        
+    except ValueError as e:
+        logger.error(f"Validation error: {str(e)}")
+        raise HTTPException(status_code=400, detail=f"Validation error: {str(e)}")
+    except Exception as e:
+        logger.error(f"Error processing optimization: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to process optimization: {str(e)}")
+
+@router.get("/status/{service_name}")
+async def get_service_status(service_name: str):
+    """
+    Get current status of a service optimization
+    """
+    try:
+        optimization_service = OptimizationService()
+        status = await optimization_service.get_service_status(service_name)
+        return {"service": service_name, "status": status}
+    except Exception as e:
+        raise HTTPException(status_code=404, detail=f"Service not found: {str(e)}")
+
+@router.get("/health")
+async def health_check():
+    """
+    Health check endpoint for frontend to verify backend connectivity
+    """
+    return {
+        "status": "healthy",
+        "timestamp": datetime.now().isoformat(),
+        "message": "Backend is running and ready to process requests"
+    }
+
+
+
+////////////////////////////
+
+
+
+import asyncio
+import subprocess
+import json
+import os
+import sys
+from datetime import datetime, timedelta
+from typing import Dict, List, Any
+from utils.datadog_client import DatadogClient
+from models.request_schema import MetricPoint, OptimizationInsight, OptimizationRecommendation
+import logging
+
+logger = logging.getLogger(__name__)
+
+class OptimizationService:
+    def __init__(self):
+        self.datadog_client = DatadogClient()
+        # Path to your optimization script - UPDATE THIS PATH
+        self.optimization_script_path = os.getenv('OPTIMIZATION_SCRIPT_PATH', './your_optimization_script.py')
+        
+    async def run_optimization(self, service_name: str, service_type: str, parameters_to_optimize: List[str], 
+                             start_date: datetime, end_date: datetime, duration_days: int) -> Dict[str, Any]:
+        """
+        Main optimization logic - calls your Python optimization script
+        """
+        try:
+            logger.info(f"Starting optimization for {service_name} (Type: {service_type}) - Parameters: {parameters_to_optimize}")
+            
+            # Step 1: Fetch historical data from Datadog (optional)
+            historical_data = await self.datadog_client.fetch_metrics(
+                service_name=service_name,
+                service_type=service_type,
+                metrics=parameters_to_optimize,
+                start_date=start_date,
+                end_date=end_date
+            )
+            
+            # Step 2: Run YOUR optimization script
+            optimization_results = await self._run_your_optimization_script(
+                service_name=service_name,
+                service_type=service_type,
+                parameters_to_optimize=parameters_to_optimize,
+                start_date=start_date,
+                end_date=end_date,
+                duration_days=duration_days,
+                historical_data=historical_data
+            )
+            
+            # Step 3: Convert results to our format
+            metrics = await self._convert_results_to_metrics(optimization_results, duration_days, start_date)
+            
+            # Step 4: Generate insights from your results
+            insights = await self._generate_insights_from_results(optimization_results, parameters_to_optimize)
+            
+            # Step 5: Create recommendations
+            recommendations = await self._create_recommendations_from_results(optimization_results, parameters_to_optimize)
+            
+            # Step 6: Send results to Datadog (optional)
+            await self.datadog_client.send_optimization_results(service_name, metrics)
+            
+            return {
+                "metrics": metrics,
+                "insights": insights,
+                "recommendations": recommendations,
+                "raw_optimization_results": optimization_results  # Include original results
+            }
+            
+        except Exception as e:
+            logger.error(f"Optimization failed: {str(e)}")
+            raise e
+    
+    async def _run_your_optimization_script(self, service_name: str, service_type: str, 
+                                          parameters_to_optimize: List[str], start_date: datetime, 
+                                          end_date: datetime, duration_days: int, 
+                                          historical_data: List[Dict]) -> Dict[str, Any]:
+        """
+        Execute your Python optimization script with the input parameters
+        """
+        try:
+            # Prepare input data for your script - matching frontend format
+            input_data = {
+                "serviceName": service_name,
+                "serviceType": service_type,
+                "parametersToOptimize": parameters_to_optimize,
+                "startDate": start_date.strftime('%Y-%m-%d'),
+                "endDate": end_date.strftime('%Y-%m-%d'),
+                "durationDays": duration_days,
+                "historical_data": historical_data,
+                "timestamp": datetime.now().isoformat()
+            }
+            
+            # Method 1: Call script as subprocess (recommended)
+            result = await self._call_script_subprocess(input_data)
+            
+            # Method 2: Import and call directly (alternative)
+            # result = await self._call_script_direct(input_data)
+            
+            return result
+            
+        except Exception as e:
+            logger.error(f"Error running optimization script: {str(e)}")
+            raise e
+    
+    async def _call_script_subprocess(self, input_data: Dict) -> Dict[str, Any]:
+        """
+        Call your optimization script as a subprocess
+        """
+        try:
+            # Convert input to JSON string
+            input_json = json.dumps(input_data)
+            
+            # Run your script
+            process = await asyncio.create_subprocess_exec(
+                sys.executable, self.optimization_script_path,
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            
+            # Send input data and get results
+            stdout, stderr = await process.communicate(input=input_json.encode())
+            
+            if process.returncode != 0:
+                error_msg = stderr.decode() if stderr else "Unknown error"
+                raise Exception(f"Optimization script failed: {error_msg}")
+            
+            # Parse results
+            result_json = stdout.decode()
+            result = json.loads(result_json)
+            
+            logger.info("Optimization script executed successfully")
+            return result
+            
+        except json.JSONDecodeError as e:
+            logger.error(f"Failed to parse optimization script output: {str(e)}")
+            raise Exception("Invalid JSON output from optimization script")
+        except Exception as e:
+            logger.error(f"Subprocess execution failed: {str(e)}")
+            raise e
+    
+    async def _call_script_direct(self, input_data: Dict) -> Dict[str, Any]:
+        """
+        Import and call your optimization script directly (alternative method)
+        """
+        try:
+            # Add the script directory to Python path
+            script_dir = os.path.dirname(os.path.abspath(self.optimization_script_path))
+            if script_dir not in sys.path:
+                sys.path.insert(0, script_dir)
+            
+            # Import your optimization module
+            script_name = os.path.splitext(os.path.basename(self.optimization_script_path))[0]
+            optimization_module = __import__(script_name)
+            
+            # Call your optimization function
+            # Assumes your script has a main function that takes input_data
+            if hasattr(optimization_module, 'optimize'):
+                result = optimization_module.optimize(input_data)
+            elif hasattr(optimization_module, 'main'):
+                result = optimization_module.main(input_data)
+            else:
+                raise Exception("No 'optimize' or 'main' function found in optimization script")
+            
+            return result
+            
+        except ImportError as e:
+            logger.error(f"Failed to import optimization script: {str(e)}")
+            raise Exception("Could not import optimization script")
+        except Exception as e:
+            logger.error(f"Direct script execution failed: {str(e)}")
+            raise e
+    
+    async def _convert_results_to_metrics(self, optimization_results: Dict, duration_days: int, start_date: datetime) -> List[MetricPoint]:
+        """
+        Convert your optimization results to MetricPoint format for frontend display
+        """
+        metrics = []
+        
+        # Check if your script returns data in expected format
+        if 'optimized_values' in optimization_results:
+            # If your script returns daily values
+            optimized_values = optimization_results['optimized_values']
+            
+            for i, value in enumerate(optimized_values[:duration_days]):
+                day = i + 1
+                timestamp = start_date + timedelta(days=i)
+                
+                # Determine status based on value
+                status = "normal"
+                if isinstance(value, dict):
+                    actual_value = value.get('value', 0)
+                    status = value.get('status', 'normal')
+                else:
+                    actual_value = float(value)
+                
+                metrics.append(MetricPoint(
+                    day=day,
+                    value=round(actual_value, 2),
+                    timestamp=timestamp,
+                    status=status
+                ))
+        
+        elif 'results' in optimization_results:
+            # If your script returns different format
+            results = optimization_results['results']
+            for i, result in enumerate(results):
+                if i >= duration_days:
+                    break
+                    
+                day = i + 1
+                timestamp = start_date + timedelta(days=i)
+                value = result if isinstance(result, (int, float)) else result.get('value', 0)
+                
+                metrics.append(MetricPoint(
+                    day=day,
+                    value=round(float(value), 2),
+                    timestamp=timestamp,
+                    status="normal"
+                ))
+        
+        else:
+            # Fallback: create sample metrics for demonstration
+            summary_value = optimization_results.get('final_value', 100)
+            improvement_rate = optimization_results.get('improvement_rate', 0.01)
+            
+            for day in range(duration_days):
+                value = summary_value * (1 - (day * improvement_rate))
+                timestamp = start_date + timedelta(days=day)
+                
+                metrics.append(MetricPoint(
+                    day=day + 1,
+                    value=round(value, 2),
+                    timestamp=timestamp,
+                    status="normal"
+                ))
+        
+        return metrics
+    
+    async def _generate_insights_from_results(self, optimization_results: Dict, parameters_to_optimize: List[str]) -> List[OptimizationInsight]:
+        """
+        Generate insights based on your optimization results
+        """
+        insights = []
+        
+        # Extract insights from your results
+        if 'insights' in optimization_results:
+            # If your script already provides insights
+            for insight_data in optimization_results['insights']:
+                insights.append(OptimizationInsight(
+                    type=insight_data.get('type', 'info'),
+                    message=insight_data.get('message', ''),
+                    impact_score=insight_data.get('impact_score', 5.0)
+                ))
+        
+        else:
+            # Generate insights from optimization metrics
+            improvement = optimization_results.get('improvement_percentage', 0)
+            params_str = ", ".join(parameters_to_optimize)
+            
+            if improvement > 10:
+                insights.append(OptimizationInsight(
+                    type="improvement",
+                    message=f"Optimization of {params_str} achieved {improvement:.1f}% improvement",
+                    impact_score=min(improvement / 10 * 8, 10.0)
+                ))
+            elif improvement < 0:
+                insights.append(OptimizationInsight(
+                    type="warning",
+                    message=f"Optimization showed {abs(improvement):.1f}% degradation - review parameters",
+                    impact_score=6.0
+                ))
+            else:
+                insights.append(OptimizationInsight(
+                    type="info",
+                    message=f"Optimization analysis completed for {params_str}",
+                    impact_score=5.0
+                ))
+            
+            # Parameter-specific insights
+            for param in parameters_to_optimize:
+                if param == 'cpu_usage':
+                    insights.append(OptimizationInsight(
+                        type="info",
+                        message="CPU usage optimization can improve response times and reduce costs",
+                        impact_score=7.0
+                    ))
+                elif param == 'memory':
+                    insights.append(OptimizationInsight(
+                        type="info",
+                        message="Memory optimization can prevent out-of-memory errors and improve stability",
+                        impact_score=6.5
+                    ))
+                elif 'DynamoDB' in param:
+                    insights.append(OptimizationInsight(
+                        type="info",
+                        message=f"{param} optimization can reduce DynamoDB costs and improve performance",
+                        impact_score=8.0
+                    ))
+            
+            # Add custom insights based on your optimization results
+            if 'warnings' in optimization_results:
+                for warning in optimization_results['warnings']:
+                    insights.append(OptimizationInsight(
+                        type="warning",
+                        message=warning,
+                        impact_score=7.0
+                    ))
+        
+        return insights
+    
+    async def _create_recommendations_from_results(self, optimization_results: Dict, parameters_to_optimize: List[str]) -> List[OptimizationRecommendation]:
+        """
+        Create recommendations based on your optimization results
+        """
+        recommendations = []
+        
+        # Extract recommendations from your results
+        if 'recommendations' in optimization_results:
+            for rec_data in optimization_results['recommendations']:
+                recommendations.append(OptimizationRecommendation(
+                    priority=rec_data.get('priority', 'medium'),
+                    action=rec_data.get('action', ''),
+                    expected_improvement=rec_data.get('expected_improvement', ''),
+                    effort_required=rec_data.get('effort_required', 'Unknown')
+                ))
+        
+        else:
+            # Generate basic recommendations based on results
+            best_config = optimization_results.get('best_configuration', {})
+            if best_config:
+                recommendations.append(OptimizationRecommendation(
+                    priority="high",
+                    action=f"Apply optimized configuration: {json.dumps(best_config, indent=2)}",
+                    expected_improvement=f"{optimization_results.get('improvement_percentage', 0):.1f}% improvement",
+                    effort_required="Low (configuration change)"
+                ))
+            
+            # Parameter-specific recommendations
+            for param in parameters_to_optimize:
+                if param == 'cpu_usage':
+                    recommendations.append(OptimizationRecommendation(
+                        priority="medium",
+                        action="Monitor CPU usage patterns and adjust instance types or scaling policies",
+                        expected_improvement="10-20% performance improvement",
+                        effort_required="Medium (infrastructure changes)"
+                    ))
+                elif param == 'memory':
+                    recommendations.append(OptimizationRecommendation(
+                        priority="medium",
+                        action="Optimize memory allocation and implement garbage collection tuning",
+                        expected_improvement="15-25% memory efficiency",
+                        effort_required="Medium (code optimization)"
+                    ))
+                elif 'DynamoDB Rcu' in param:
+                    recommendations.append(OptimizationRecommendation(
+                        priority="high",
+                        action="Implement read capacity auto-scaling and optimize query patterns",
+                        expected_improvement="20-40% cost reduction",
+                        effort_required="Low (configuration change)"
+                    ))
+                elif 'DynamoDB Wcu' in param:
+                    recommendations.append(OptimizationRecommendation(
+                        priority="high",
+                        action="Implement write capacity auto-scaling and batch write operations",
+                        expected_improvement="25-45% cost reduction",
+                        effort_required="Medium (code optimization)"
+                    ))
+        
+        return recommendations
+    
+    async def get_service_status(self, service_name: str) -> Dict[str, Any]:
+        """
+        Get current status of a service
+        """
+        return {
+            "health": "healthy",
+            "last_optimization": datetime.now().isoformat(),
+            "current_performance": "optimal",
+            "optimization_script": self.optimization_script_path,
+            "supported_parameters": ['cpu_usage', 'memory', 'DynamoDB Rcu', 'DynamoDB Wcu']
+        }
+
+
+//////////////
+import os
+import asyncio
+import aiohttp
+from datetime import datetime, timedelta
+from typing import Dict, List, Any
+import logging
+
+logger = logging.getLogger(__name__)
+
+class DatadogClient:
+    def __init__(self):
+        self.api_key = os.getenv('DATADOG_API_KEY')
+        self.app_key = os.getenv('DATADOG_APP_KEY')
+        self.base_url = 'https://api.datadoghq.com/api/v1'
+        
+        if not self.api_key or not self.app_key:
+            logger.warning("Datadog API keys not found. Using mock data.")
+            self.use_mock_data = True
+        else:
+            self.use_mock_data = False
+    
+    async def fetch_metrics(self, service_name: str, service_type: str, metrics: List[str], 
+                          start_date: datetime, end_date: datetime) -> List[Dict]:
+        """
+        Fetch metrics from Datadog for the specified service and parameters
+        """
+        if self.use_mock_data:
+            return self._generate_mock_data(service_name, service_type, metrics, start_date, end_date)
+        
+        try:
+            all_metrics = []
+            
+            for metric in metrics:
+                datadog_metric = self._map_frontend_to_datadog_metric(metric)
+                
+                # Construct query for the specific service
+                query = f"avg:{datadog_metric}{{service:{service_name},service_type:{service_type}}}"
+                
+                # Fetch data from Datadog
+                metric_data = await self._fetch_metric_data(query, start_date, end_date)
+                
+                all_metrics.append({
+                    'parameter': metric,
+                    'datadog_metric': datadog_metric,
+                    'data': metric_data
+                })
+            
+            return all_metrics
+            
+        except Exception as e:
+            logger.error(f"Error fetching metrics from Datadog: {str(e)}")
+            # Fallback to mock data if Datadog fails
+            return self._generate_mock_data(service_name, service_type, metrics, start_date, end_date)
+    
+    def _map_frontend_to_datadog_metric(self, frontend_metric: str) -> str:
+        """
+        Map frontend parameter names to Datadog metric names
+        """
+        metric_mapping = {
+            'cpu_usage': 'system.cpu.usage',
+            'memory': 'system.mem.usage',
+            'DynamoDB Rcu': 'aws.dynamodb.consumed_read_capacity_units',
+            'DynamoDB Wcu': 'aws.dynamodb.consumed_write_capacity_units'
+        }
+        
+        return metric_mapping.get(frontend_metric, frontend_metric)
+    
+    async def _fetch_metric_data(self, query: str, start_date: datetime, end_date: datetime) -> List[Dict]:
+        """
+        Fetch actual metric data from Datadog API
+        """
+        try:
+            headers = {
+                'DD-API-KEY': self.api_key,
+                'DD-APPLICATION-KEY': self.app_key,
+                'Content-Type': 'application/json'
+            }
+            
+            params = {
+                'query': query,
+                'from': int(start_date.timestamp()),
+                'to': int(end_date.timestamp())
+            }
+            
+            async with aiohttp.ClientSession() as session:
+                async with session.get(f"{self.base_url}/query", headers=headers, params=params) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        return self._process_datadog_response(data)
+                    else:
+                        logger.error(f"Datadog API error: {response.status}")
+                        return []
+                        
+        except Exception as e:
+            logger.error(f"Error calling Datadog API: {str(e)}")
+            return []
+    
+    def _process_datadog_response(self, data: Dict) -> List[Dict]:
+        """
+        Process Datadog API response into our format
+        """
+        processed_data = []
+        
+        if 'series' in data:
+            for series in data['series']:
+                if 'pointlist' in series:
+                    for point in series['pointlist']:
+                        timestamp = datetime.fromtimestamp(point[0] / 1000)  # Convert from milliseconds
+                        value = point[1]
+                        
+                        processed_data.append({
+                            'timestamp': timestamp.isoformat(),
+                            'value': value
+                        })
+        
+        return processed_data
+    
+    def _generate_mock_data(self, service_name: str, service_type: str, metrics: List[str], 
+                          start_date: datetime, end_date: datetime) -> List[Dict]:
+        """
+        Generate mock data when Datadog is not available
+        """
+        logger.info(f"Generating mock data for {service_name} ({service_type}) - {metrics}")
+        
+        mock_data = []
+        duration = (end_date - start_date).days
+        
+        for metric in metrics:
+            metric_data = []
+            base_value = self._get_base_value_for_metric(metric)
+            
+            for i in range(duration):
+                current_date = start_date + timedelta(days=i)
+                # Add some variation to the data
+                variation = 0.1 * (i % 3 - 1)  # -10% to +10% variation
+                value = base_value * (1 + variation)
+                
+                metric_data.append({
+                    'timestamp': current_date.isoformat(),
+                    'value': round(value, 2)
+                })
+            
+            mock_data.append({
+                'parameter': metric,
+                'datadog_metric': self._map_frontend_to_datadog_metric(metric),
+                'data': metric_data
+            })
+        
+        return mock_data
+    
+    def _get_base_value_for_metric(self, metric: str) -> float:
+        """
+        Get realistic base values for different metrics
+        """
+        base_values = {
+            'cpu_usage': 65.0,  # 65% CPU usage
+            'memory': 78.5,     # 78.5% memory usage
+            'DynamoDB Rcu': 150.0,  # 150 RCU
+            'DynamoDB Wcu': 75.0    # 75 WCU
+        }
+        
+        return base_values.get(metric, 100.0)
+    
+    async def send_optimization_results(self, service_name: str, metrics: List[Dict]) -> bool:
+        """
+        Send optimization results back to Datadog (optional)
+        """
+        if self.use_mock_data:
+            logger.info(f"Mock: Would send optimization results for {service_name}")
+            return True
+        
+        try:
+            # Convert metrics to Datadog format and send
+            datadog_metrics = []
+            
+            for metric in metrics:
+                datadog_metrics.append({
+                    'metric': f'optimization.{service_name}.result',
+                    'points': [[int(metric.timestamp.timestamp()), metric.value]],
+                    'tags': [f'service:{service_name}', f'status:{metric.status}']
+                })
+            
+            headers = {
+                'DD-API-KEY': self.api_key,
+                'Content-Type': 'application/json'
+            }
+            
+            payload = {'series': datadog_metrics}
+            
+            async with aiohttp.ClientSession() as session:
+                async with session.post(f"{self.base_url}/series", headers=headers, json=payload) as response:
+                    if response.status == 202:
+                        logger.info(f"Successfully sent optimization results to Datadog for {service_name}")
+                        return True
+                    else:
+                        logger.error(f"Failed to send metrics to Datadog: {response.status}")
+                        return False
+                        
+        except Exception as e:
+            logger.error(f"Error sending optimization results to Datadog: {str(e)}")
+            return False
+
+
+
+////////////////////////////////
+
+#!/usr/bin/env python3
+"""
+Sample Optimization Script Template
+This is a template for your actual optimization script that the backend will call.
+Replace this with your actual optimization logic.
+"""
+
+import json
+import sys
+from datetime import datetime, timedelta
+from typing import Dict, List, Any
+import random
+
+def optimize(input_data: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Main optimization function that your script should implement.
+    
+    Args:
+        input_data: Dictionary containing:
+            - serviceName: str
+            - serviceType: str  
+            - parametersToOptimize: List[str]
+            - startDate: str (YYYY-MM-DD)
+            - endDate: str (YYYY-MM-DD)
+            - durationDays: int
+            - historical_data: List[Dict] (from Datadog)
+            - timestamp: str
+    
+    Returns:
+        Dictionary containing optimization results
+    """
+    
+    service_name = input_data['serviceName']
+    service_type = input_data['serviceType']
+    parameters = input_data['parametersToOptimize']
+    duration_days = input_data['durationDays']
+    
+    print(f"Starting optimization for {service_name} ({service_type})", file=sys.stderr)
+    print(f"Parameters to optimize: {parameters}", file=sys.stderr)
+    print(f"Duration: {duration_days} days", file=sys.stderr)
+    
+    # Your optimization logic goes here
+    # This is just a sample implementation
+    
+    # Sample optimization results
+    optimized_values = []
+    base_values = {
+        'cpu_usage': 65.0,
+        'memory': 78.5,
+        'DynamoDB Rcu': 150.0,
+        'DynamoDB Wcu': 75.0
+    }
+    
+    # Generate optimized values over time
+    for day in range(duration_days):
+        day_values = {}
+        for param in parameters:
+            base_val = base_values.get(param, 100.0)
+            # Simulate optimization improvement over time
+            improvement_rate = 0.02  # 2% improvement per day
+            optimized_val = base_val * (1 - (day * improvement_rate))
+            
+            # Add some realistic variation
+            variation = random.uniform(-0.05, 0.05)  # ±5% variation
+            final_val = optimized_val * (1 + variation)
+            
+            day_values[param] = {
+                'value': round(final_val, 2),
+                'status': 'normal' if final_val < base_val * 0.9 else 'warning'
+            }
+        
+        optimized_values.append(day_values)
+    
+    # Calculate overall improvement
+    total_improvement = 0
+    for param in parameters:
+        initial_val = base_values.get(param, 100.0)
+        final_val = optimized_values[-1][param]['value'] if optimized_values else initial_val
+        param_improvement = ((initial_val - final_val) / initial_val) * 100
+        total_improvement += param_improvement
+    
+    avg_improvement = total_improvement / len(parameters) if parameters else 0
+    
+    # Generate insights
+    insights = []
+    if avg_improvement > 15:
+        insights.append({
+            'type': 'improvement',
+            'message': f'Significant optimization achieved with {avg_improvement:.1f}% average improvement',
+            'impact_score': 9.0
+        })
+    elif avg_improvement > 5:
+        insights.append({
+            'type': 'improvement', 
+            'message': f'Moderate optimization achieved with {avg_improvement:.1f}% average improvement',
+            'impact_score': 7.0
+        })
+    else:
+        insights.append({
+            'type': 'info',
+            'message': f'Optimization completed with {avg_improvement:.1f}% improvement',
+            'impact_score': 5.0
+        })
+    
+    # Add parameter-specific insights
+    for param in parameters:
+        if param == 'cpu_usage':
+            insights.append({
+                'type': 'info',
+                'message': 'CPU optimization will reduce compute costs and improve response times',
+                'impact_score': 8.0
+            })
+        elif 'DynamoDB' in param:
+            insights.append({
+                'type': 'improvement',
+                'message': f'{param} optimization will significantly reduce AWS costs',
+                'impact_score': 9.0
+            })
+    
+    # Generate recommendations
+    recommendations = []
+    
+    # Best configuration recommendation
+    best_config = {}
+    for param in parameters:
+        if optimized_values:
+            best_val = optimized_values[-1][param]['value']
+            best_config[param] = f"Target: {best_val}"
+    
+    if best_config:
+        recommendations.append({
+            'priority': 'high',
+            'action': f'Apply optimized configuration: {json.dumps(best_config, indent=2)}',
+            'expected_improvement': f'{avg_improvement:.1f}% overall improvement',
+            'effort_required': 'Medium (configuration changes required)'
+        })
+    
+    # Parameter-specific recommendations
+    for param in parameters:
+        if param == 'cpu_usage':
+            recommendations.append({
+                'priority': 'medium',
+                'action': 'Implement CPU-based auto-scaling and optimize compute-intensive operations',
+                'expected_improvement': '10-20% CPU efficiency gain',
+                'effort_required': 'High (code optimization required)'
+            })
+        elif param == 'memory':
+            recommendations.append({
+                'priority': 'medium',
+                'action': 'Optimize memory usage patterns and implement memory pooling',
+                'expected_improvement': '15-25% memory efficiency gain',
+                'effort_required': 'High (application refactoring)'
+            })
+        elif param == 'DynamoDB Rcu':
+            recommendations.append({
+                'priority': 'high',
+                'action': 'Enable DynamoDB auto-scaling for read capacity and optimize query patterns',
+                'expected_improvement': '30-50% cost reduction',
+                'effort_required': 'Low (configuration change)'
+            })
+        elif param == 'DynamoDB Wcu':
+            recommendations.append({
+                'priority': 'high',
+                'action': 'Enable DynamoDB auto-scaling for write capacity and implement batch operations',
+                'expected_improvement': '25-45% cost reduction',
+                'effort_required': 'Medium (code optimization)'
+            })
+    
+    # Prepare final results
+    results = {
+        'success': True,
+        'service_name': service_name,
+        'service_type': service_type,
+        'parameters_optimized': parameters,
+        'optimization_duration_days': duration_days,
+        'optimized_values': optimized_values,
+        'improvement_percentage': avg_improvement,
+        'best_configuration': best_config,
+        'insights': insights,
+        'recommendations': recommendations,
+        'optimization_completed_at': datetime.now().isoformat(),
+        'metadata': {
+            'algorithm_used': 'sample_optimization_v1.0',
+            'confidence_score': 0.85,
+            'data_quality': 'good'
+        }
+    }
+    
+    return results
+
+def main():
+    """
+    Main function when script is called directly
+    """
+    try:
+        # Read input from stdin
+        input_json = sys.stdin.read()
+        input_data = json.loads(input_json)
+        
+        # Run optimization
+        results = optimize(input_data)
+        
+        # Output results as JSON
+        print(json.dumps(results, indent=2))
+        
+    except Exception as e:
+        error_result = {
+            'success': False,
+            'error': str(e),
+            'timestamp': datetime.now().isoformat()
+        }
+        print(json.dumps(error_result), file=sys.stderr)
+        sys.exit(1)
+
+if __name__ == '__main__':
+    main()
+
+
+
+
+////////////////////////////
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+import logging
+import uvicorn
+from datetime import datetime
+
+# Import your router
+from routers.optimization_router import router as optimization_router
+
+# Setup logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+# Create FastAPI app
+app = FastAPI(
+    title="Service Optimization API",
+    description="API for optimizing service parameters and performance metrics",
+    version="1.0.0",
+    docs_url="/docs",
+    redoc_url="/redoc"
+)
+
+# CORS middleware to allow frontend connections
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:3000",  # React dev server
+        "http://localhost:3001", 
+        "http://127.0.0.1:3000",
+        "https://your-frontend-domain.com",  # Add your production domain
+        "*"  # Remove this in production and specify exact origins
+    ],
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allow_headers=["*"],
+)
+
+# Include routers
+app.include_router(
+    optimization_router, 
+    prefix="/api/v1/optimization",
+    tags=["optimization"]
+)
+
+# Root endpoint
+@app.get("/")
+async def root():
+    """
+    Root endpoint with API information
+    """
+    return {
+        "message": "Service Optimization API",
+        "version": "1.0.0",
+        "status": "running",
+        "timestamp": datetime.now().isoformat(),
+        "endpoints": {
+            "health": "/health",
+            "docs": "/docs",
+            "optimization": "/api/v1/optimization"
+        }
+    }
+
+# Health check endpoint (matches what frontend expects)
+@app.get("/health")
+async def health_check():
+    """
+    Health check endpoint for frontend connectivity verification
+    """
+    return {
+        "status": "healthy",
+        "timestamp": datetime.now().isoformat(),
+        "message": "Backend is running and ready to process requests",
+        "version": "1.0.0"
+    }
+
+# Global exception handler
+@app.exception_handler(Exception)
+async def global_exception_handler(request, exc):
+    """
+    Global exception handler for unexpected errors
+    """
+    logger.error(f"Unhandled exception: {str(exc)}", exc_info=True)
+    
+    return JSONResponse(
+        status_code=500,
+        content={
+            "success": False,
+            "message": "Internal server error occurred",
+            "error": str(exc),
+            "timestamp": datetime.now().isoformat()
+        }
+    )
+
+# Startup event
+@app.on_event("startup")
+async def startup_event():
+    """
+    Application startup event
+    """
+    logger.info("Service Optimization API starting up...")
+    logger.info("API documentation available at: /docs")
+    logger.info("Health check available at: /health")
+    logger.info("Optimization endpoint available at: /api/v1/optimization")
+
+# Shutdown event
+@app.on_event("shutdown")
+async def shutdown_event():
+    """
+    Application shutdown event
+    """
+    logger.info("Service Optimization API shutting down...")
+
+if __name__ == "__main__":
+    # Run the application
+    uvicorn.run(
+        "main:app",
+        host="0.0.0.0",
+        port=8000,
+        reload=True,  # Remove in production
+        log_level="info"
+    )
+
+
+
+
+///////////////////////////
+fastapi>=0.104.1
+uvicorn[standard]>=0.24.0
+pydantic>=2.5.0
+aiohttp>=3.9.0
+python-multipart>=0.0.6
+python-dotenv>=1.0.0
+
+# Optional: For enhanced logging and monitoring
+structlog>=23.2.0
+
+# Optional: For testing
+pytest>=7.4.0
+pytest-asyncio>=0.21.0
+httpx>=0.25.0
+
+
+
+
+
+
+
+//////////////////////
+# Environment Variables Template
+# Copy this file to .env and fill in your values
+
+# Datadog Configuration (Optional - will use mock data if not provided)
+DATADOG_API_KEY=your_datadog_api_key_here
+DATADOG_APP_KEY=your_datadog_application_key_here
+
+# Optimization Script Configuration
+OPTIMIZATION_SCRIPT_PATH=./your_optimization_script.py
+
+# API Configuration
+API_HOST=0.0.0.0
+API_PORT=8000
+LOG_LEVEL=INFO
+
+# CORS Configuration (comma-separated list)
+ALLOWED_ORIGINS=http://localhost:3000,http://localhost:3001,http://127.0.0.1:3000
+
+# Optional: Database Configuration (if you want to store optimization results)
+# DATABASE_URL=postgresql://user:password@localhost/dbname
+
+# Optional: Redis Configuration (for caching)
+# REDIS_URL=redis://localhost:6379/0
+
+
+
+
+
+
+
+
+
+
+
+///////////////////
+## Summary
+
+I've updated your backend to be fully compatible with your frontend form. Here are the key changes made:
+
+### **1. Updated Request Schema (`request_schema.py`)**
+- Changed field names to match frontend: `serviceType`, `serviceName`, `parametersToOptimize`, `startDate`, `endDate`
+- Updated parameter validation to match frontend options: `'cpu_usage'`, `'memory'`, `'DynamoDB Rcu'`, `'DynamoDB Wcu'`
+- Added proper date string validation (YYYY-MM-DD format)
+- Added service type validation for the 4 types from your frontend
+
+### **2. Updated Router (`optimization_router.py`)**
+- Modified to handle the new request format
+- Added date parsing from string to datetime
+- Added a `/health` endpoint that your frontend's `checkBackendHealth()` function can use
+- Better error handling with appropriate HTTP status codes
+
+### **3. Updated Service Layer (`run_script.py`)**
+- Modified to accept the new parameter structure from frontend
+- Updated to pass data to your optimization script in the format your frontend sends
+- Enhanced metric generation and processing
+- Added parameter-specific insights and recommendations
+
+### **4. Updated Datadog Client (`datadog_client.py`)**
+- Added proper metric mapping for frontend parameters
+- Enhanced mock data generation when Datadog is unavailable
+- Better error handling and fallback mechanisms
+
+### **5. Sample Optimization Script Template**
+- Created a template showing how your actual optimization script should be structured
+- Shows input/output format expected by the backend
+- Includes sample optimization logic you can replace with your actual algorithm
+
+### **6. Main Application (`main.py`)**
+- Added proper CORS configuration for frontend communication
+- Added health check endpoint
+- Enhanced error handling and logging
+
+### **Key Compatibility Features:**
+
+✅ **Field Names Match**: Backend now expects `serviceType`, `serviceName`, `parametersToOptimize`, `startDate`, `endDate`
+
+✅ **Parameter Options Match**: Validates against `'cpu_usage'`, `'memory'`, `'DynamoDB Rcu'`, `'DynamoDB Wcu'`
+
+✅ **Service Types Match**: Validates against `'type1'`, `'type2'`, `'type3'`, `'type4'`
+
+✅ **Date Format Match**: Handles YYYY-MM-DD string dates from frontend
+
+✅ **Health Check**: Provides `/health` endpoint for your frontend's connectivity check
+
+### **To Use This Updated Backend:**
+
+1. **Install dependencies**: `pip install -r requirements.txt`
+2. **Set up environment**: Copy `.env.example` to `.env` and configure
+3. **Replace sample script**: Update `OPTIMIZATION_SCRIPT_PATH` to point to your actual optimization script
+4. **Run the server**: `python main.py` or `uvicorn main:app --reload`
+
+The backend will now properly receive and validate the exact data structure your frontend is sending, and your optimization script will receive the data in a clean, structured format.
